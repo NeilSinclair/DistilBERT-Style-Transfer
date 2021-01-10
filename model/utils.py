@@ -186,5 +186,5 @@ def freeze_multiple_params(model_method, params):
   for i, param in enumerate(params):
     if param:
       freeze_params(model_method[i])
-    elif freeze_token_embeds == False:
+    elif param == False:
       freeze_params(model_method[i], action = "no_freeze")
