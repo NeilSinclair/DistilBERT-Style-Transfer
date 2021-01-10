@@ -85,10 +85,6 @@ class CreateTokens(object):
                                         sample['Label'])
         return sample
 
-
-encode_single_sentence(self.tokenizer, self.create_emb, sample['Masked'], sample['Original'], sample['Label'])
-
-
 def encode_single_sentence(tokenizer, model_emb, source_sentence, target_sentence, class_label, max_length=32,
                            pad_to_max_length=True, return_tensors="pt",
                            add_special_tokens=False, return_targets=True):
