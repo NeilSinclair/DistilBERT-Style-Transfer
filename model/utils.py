@@ -73,8 +73,10 @@ class CreateTokens(object):
     ''' Create the embeddings for the sentences passed into the model '''
 
     def __init__(self, tokenizer, create_emb):
-        ''' tokenizer - the BART tokenizer
-            create_emb - the create_embedding() method from the BART model '''
+        ''' tokenizer - the BART/BERT tokenizer
+            create_emb - the create_embedding() method from the BART/BERT model
+                         this is only used in a special case of this function
+        '''
 
         self.tokenizer = tokenizer
         self.create_emb = create_emb
@@ -184,3 +186,100 @@ def freeze_multiple_params(model_method, params):
       freeze_params(model_method[i])
     elif param == False:
       freeze_params(model_method[i], action = "no_freeze")
+
+
+def sentence_rewriter(mask_ids, g_samp, original_sentences, vocab, device='cuda'):
+    ''' Function that rewrites sentences with the generated words
+      Args: mask_ids - a matrix indicating with a 0 where the masked tokens are in each sentence
+            gs_one_hot_mat - matrix of gumbel_softmax predictions; essentially one hot encodings
+                             of the sampled token, 1 row for each masked token
+            original_sentences - the original sentences
+            vocab - a tensor containing np.arange(0, len(tokenizer vocab))
+    '''
+    mask_idx = mask_ids.nonzero()
+    # Add the new words in
+    curr_idx = 0
+    # store the first masked indices
+    mask_idx_temp = mask_idx[0, ].unsqueeze(0)
+    g_samp_temp = g_samp[0, ].unsqueeze(0)
+    mask_idx_new = []
+
+    # create a nested list of the mask_idx tensors, 1 position for each source sentnece
+    for i, idx in enumerate(mask_idx[1:, :]):
+        # If the sentence we're processing is the same as the last one, make amendments accordingly
+        if idx[0].item() == curr_idx:
+            if len(idx.size()) == 1:
+                idx_ = idx.unsqueeze(0)
+            else:
+                idx_ = idx
+            mask_idx_temp = torch.cat((mask_idx_temp, idx_), dim=0)
+            g_samp_temp = torch.cat((g_samp_temp, g_samp[i].unsqueeze(0)), dim=0)
+            # If this is the last sentence of the batch, make the amendments
+            if idx[0].item() == mask_idx[-1, 0].item():
+                original_sentences[idx[0]] = reconstitute_sentence(g_samp_temp, vocab,
+                                                                   original_sentences[idx[0]],
+                                                                   mask_ids[idx[0]],
+                                                                   mask_idx_temp)
+
+        # If we've moved onto the next sentence, then make the amendments
+        else:
+            original_sentences[idx[0] - 1] = reconstitute_sentence(g_samp_temp, vocab,
+                                                                   original_sentences[idx[0] - 1],
+                                                                   mask_ids[idx[0] - 1],
+                                                                   mask_idx_temp)
+            mask_idx_temp = idx.unsqueeze(0)
+            g_samp_temp = g_samp[i].unsqueeze(0)
+            curr_idx += 1
+
+    return original_sentences.type(torch.LongTensor)
+
+
+# Create a timing function
+def format_time(elapsed):
+    elapsed_rounded = int(round(elapsed))
+
+    return str(datetime.timedelta(seconds=elapsed_rounded))
+
+
+def reconstitute_sentence(g_samp, voc, original_sent, mask_ids, mask_idx):
+    ''' Function that returns a sentence with words substituted by gumbel_softmax sampling
+    Args: g_samp - one_hot_encoding sampled using gumbel softmax
+          vocab - a tensor of the vocab indexes
+          mask_idx - the mask indices, a tensor of [sentence_number, mask_position]
+          original_sent - the original sentence (tokens)
+          mask_ids - a matrix of 1's and 0's indicating where the masked ids are
+    Returns a reconstituted sentence
+    '''
+    sentence_parts = None
+    for i in range(mask_idx.size()[0] + 1):
+        if i >= mask_idx.size()[0]:
+            # print(f"final sentence piece being added is {(original_sent * (1-mask_ids))}")
+            # print(f"mask_ids looks like {mask_ids}")
+            # print(f"original_sent looks like {original_sent}")
+            sentence_parts = torch.cat((sentence_parts.squeeze(1), (original_sent * (1 - mask_ids)).unsqueeze(0)),
+                                       dim=0)
+            # print(f"And, final sentence parts are {sentence_parts}")
+        else:
+            tmp_ = torch.zeros_like(mask_ids)
+            if len(mask_idx.size()) == 1:
+                tmp_[mask_idx[i]] = 1
+                tmp_ = tmp_.unsqueeze(0)
+            else:
+                tmp_[mask_idx[i, 1]] = 1
+            diag = torch.diag(tmp_).type(torch.float32)
+            # print(f"g_samp[i]: {g_samp[i].unsqueeze(0)}")
+            # print(f"voc: {voc}")
+            # print("torch.ones_like(original_sent, dtype = torch.FloatTensor)): {torch.ones_like(original_sent, dtype = torch.FloatTensor))}")
+
+            word = ((g_samp[i].unsqueeze(0) @ voc) * torch.ones_like(original_sent))
+            # This creates a tensor of length [sentence] containing just the word that was generated
+            # based on what was pulled using the gumbel softmax
+            if sentence_parts is None:
+                sentence_parts = (word @ diag).unsqueeze(0)
+                # print(f"first sentence_part is {sentence_parts}")
+            else:
+                x_ = (word @ diag).unsqueeze(0)
+                # print(f"x_ is {x_}")
+                sentence_parts = torch.cat((sentence_parts, x_), dim=0)
+
+    return sentence_parts.sum(dim=0)
